@@ -1,7 +1,8 @@
-import type { MouseEvent as ReactMouseEvent } from "react";
-import { useEffect, useRef, useState, useCallback } from "react";
+import type { PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { PosterImageTransform } from "../types/movie";
+import { getCoverImageStyle } from "../utils/imageLayout";
 
 interface ImageCropEditorProps {
   imageSrc: string;
@@ -9,11 +10,13 @@ interface ImageCropEditorProps {
   onTransformChange: (next: PosterImageTransform) => void;
   onReset: () => void;
   containerAspect?: number;
+  title?: string;
 }
 
-const MIN_ZOOM = 0.8;
-const MAX_ZOOM = 2.2;
+const MIN_ZOOM = 1;
+const MAX_ZOOM = 3;
 const FALLBACK_ASPECT = 67 / 45;
+const WORKSPACE_ASPECT = 4 / 3;
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
@@ -25,22 +28,25 @@ export function ImageCropEditor({
   onTransformChange,
   onReset,
   containerAspect = FALLBACK_ASPECT,
+  title = "Ajuste da imagem do poster",
 }: ImageCropEditorProps) {
-  const viewportRef = useRef<HTMLDivElement>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
   const dragStartRef = useRef<{
     pointerX: number;
     pointerY: number;
     startX: number;
     startY: number;
+    zoom: number;
   } | null>(null);
 
   const [dragging, setDragging] = useState(false);
-  const [imageAspect, setImageAspect] = useState(containerAspect);
+  const [imageAspect, setImageAspect] = useState<number | null>(null);
 
+  const effectiveAspect = imageAspect ?? containerAspect;
   const baseWidth =
-    imageAspect > containerAspect ? imageAspect / containerAspect : 1;
+    effectiveAspect > containerAspect ? effectiveAspect / containerAspect : 1;
   const baseHeight =
-    imageAspect > containerAspect ? 1 : containerAspect / imageAspect;
+    effectiveAspect > containerAspect ? 1 : containerAspect / effectiveAspect;
 
   const getPanBounds = useCallback(
     (zoom: number) => {
@@ -69,25 +75,35 @@ export function ImageCropEditor({
     [getPanBounds],
   );
 
+  const clampTransformRef = useRef(clampTransform);
+  const onTransformChangeRef = useRef(onTransformChange);
+
+  useEffect(() => {
+    clampTransformRef.current = clampTransform;
+    onTransformChangeRef.current = onTransformChange;
+  }, [clampTransform, onTransformChange]);
+
   useEffect(() => {
     if (!dragging) return;
 
-    function handleMouseMove(event: MouseEvent) {
-      if (!dragStartRef.current || !viewportRef.current) {
+    function handlePointerMove(event: PointerEvent) {
+      if (!dragStartRef.current || !stageRef.current) {
         return;
       }
 
-      const { pointerX, pointerY, startX, startY } = dragStartRef.current;
-      const rect = viewportRef.current.getBoundingClientRect();
+      const { pointerX, pointerY, startX, startY, zoom } = dragStartRef.current;
+      const rect = stageRef.current.getBoundingClientRect();
 
-      const dxPercent =
-        (((event.clientX - pointerX) / rect.width) * 100) / transform.zoom;
-      const dyPercent =
-        (((event.clientY - pointerY) / rect.height) * 100) / transform.zoom;
+      if (rect.width <= 0 || rect.height <= 0) {
+        return;
+      }
 
-      onTransformChange(
-        clampTransform({
-          ...transform,
+      const dxPercent = ((event.clientX - pointerX) / rect.width) * 100;
+      const dyPercent = ((event.clientY - pointerY) / rect.height) * 100;
+
+      onTransformChangeRef.current(
+        clampTransformRef.current({
+          zoom,
           x: startX + dxPercent,
           y: startY + dyPercent,
         }),
@@ -99,17 +115,19 @@ export function ImageCropEditor({
       setDragging(false);
     }
 
-    window.addEventListener("mousemove", handleMouseMove);
-    window.addEventListener("mouseup", stopDragging);
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", stopDragging);
+    window.addEventListener("pointercancel", stopDragging);
 
     return () => {
-      window.removeEventListener("mousemove", handleMouseMove);
-      window.removeEventListener("mouseup", stopDragging);
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", stopDragging);
+      window.removeEventListener("pointercancel", stopDragging);
     };
-  }, [dragging, transform, clampTransform, onTransformChange]);
+  }, [dragging]);
 
-  function startDragging(event: ReactMouseEvent<HTMLDivElement>) {
-    if (!viewportRef.current) {
+  function startDragging(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.button !== 0 || !stageRef.current) {
       return;
     }
 
@@ -119,6 +137,7 @@ export function ImageCropEditor({
       pointerY: event.clientY,
       startX: transform.x,
       startY: transform.y,
+      zoom: transform.zoom,
     };
 
     setDragging(true);
@@ -138,79 +157,103 @@ export function ImageCropEditor({
     );
   }
 
-  function handleImageLoad(event: React.SyntheticEvent<HTMLImageElement>) {
-    const { naturalWidth, naturalHeight } = event.currentTarget;
+  const syncNaturalAspect = useCallback(
+    (naturalWidth: number, naturalHeight: number) => {
+      if (naturalWidth <= 0 || naturalHeight <= 0) {
+        return;
+      }
 
-    if (naturalWidth <= 0 || naturalHeight <= 0) {
-      return;
-    }
+      const nextAspect = naturalWidth / naturalHeight;
+      setImageAspect((prev) => (prev === nextAspect ? prev : nextAspect));
 
-    setImageAspect(naturalWidth / naturalHeight);
-    onTransformChange(clampTransform(transform));
-  }
+      const nextBaseWidth =
+        nextAspect > containerAspect ? nextAspect / containerAspect : 1;
+      const nextBaseHeight =
+        nextAspect > containerAspect ? 1 : containerAspect / nextAspect;
+      const clampedZoom = clamp(transform.zoom, MIN_ZOOM, MAX_ZOOM);
+      const maxX = Math.max(0, ((nextBaseWidth * clampedZoom - 1) / 2) * 100);
+      const maxY = Math.max(0, ((nextBaseHeight * clampedZoom - 1) / 2) * 100);
+      const clampedX = clamp(transform.x, -maxX, maxX);
+      const clampedY = clamp(transform.y, -maxY, maxY);
+
+      if (
+        clampedZoom !== transform.zoom ||
+        clampedX !== transform.x ||
+        clampedY !== transform.y
+      ) {
+        onTransformChange({
+          zoom: clampedZoom,
+          x: clampedX,
+          y: clampedY,
+        });
+      }
+    },
+    [containerAspect, onTransformChange, transform.x, transform.y, transform.zoom],
+  );
+
+  const handleImgRef = useCallback(
+    (img: HTMLImageElement | null) => {
+      if (img && img.complete && img.naturalWidth > 0 && img.naturalHeight > 0) {
+        syncNaturalAspect(img.naturalWidth, img.naturalHeight);
+      }
+    },
+    [syncNaturalAspect],
+  );
+
+  const isPortraitStage = containerAspect < WORKSPACE_ASPECT;
 
   return (
     <section className="crop-editor" aria-label="Editor de corte da imagem">
       <div className="crop-editor__head">
-        <h2>Ajuste da imagem do poster</h2>
+        <h2>{title}</h2>
         <button type="button" onClick={onReset}>
           Resetar
         </button>
       </div>
 
       <p>
-        Arraste para reposicionar no corte e ajuste o zoom mantendo a proporcao
-        da imagem do poster.
+        Arraste a imagem para escolher o recorte e ajuste o zoom mantendo a
+        proporcao exata do poster.
       </p>
 
-      <div className="crop-editor__workspace">
-        <img
-          src={imageSrc}
-          alt="Imagem original"
-          className="crop-editor__image"
-          crossOrigin="anonymous"
-          referrerPolicy="no-referrer"
-          draggable={false}
-          onLoad={handleImageLoad}
-        />
+      <div
+        className={`crop-editor__workspace${dragging ? " is-dragging" : ""}`}
+        onPointerDown={startDragging}
+      >
         <div
-          ref={viewportRef}
-          className={`crop-editor__crop-window${dragging ? " is-dragging" : ""}`}
-          onMouseDown={startDragging}
+          ref={stageRef}
+          className={`crop-editor__stage${isPortraitStage ? " crop-editor__stage--portrait" : ""}`}
           style={{ aspectRatio: containerAspect }}
         >
           <div
+            className="crop-editor__image-layer"
             style={{
-              position: "absolute",
-              inset: 0,
               transform: `translate3d(${transform.x}%, ${transform.y}%, 0) scale(${transform.zoom})`,
-              pointerEvents: "none",
             }}
           >
             <img
+              ref={handleImgRef}
               src={imageSrc}
               alt="Previa de corte"
               className="crop-editor__crop-image"
               crossOrigin="anonymous"
               referrerPolicy="no-referrer"
               draggable={false}
-              style={{
-                width: `${baseWidth * 100}%`,
-                height: `${baseHeight * 100}%`,
-                left: "50%",
-                top: "50%",
-                transform: "translate(-50%, -50%)",
-                maxWidth: "none",
+              onLoad={(event) => {
+                const { naturalWidth, naturalHeight } = event.currentTarget;
+                syncNaturalAspect(naturalWidth, naturalHeight);
               }}
+              style={getCoverImageStyle(imageAspect, containerAspect)}
             />
           </div>
+          <div className="crop-editor__mask" aria-hidden />
         </div>
         <div className="crop-editor__hint">Area exibida no poster</div>
       </div>
 
       <div className="crop-editor__controls">
         <label>
-          Zoom minimo {MIN_ZOOM.toFixed(1)}x
+          Zoom ({MIN_ZOOM.toFixed(1)}x - {MAX_ZOOM.toFixed(1)}x)
           <input
             type="range"
             min={MIN_ZOOM}

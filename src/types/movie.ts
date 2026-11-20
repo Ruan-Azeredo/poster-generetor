@@ -1,3 +1,7 @@
+export type PosterImageMode = 'single' | 'triple'
+
+export type TripleSlotIndex = 0 | 1 | 2
+
 export interface PosterMovieData {
   title: string
   originalTitle: string
@@ -9,6 +13,7 @@ export interface PosterMovieData {
   tmdbImageUrl: string
   tmdbPosterUrl: string
   tmdbBackdropUrl: string
+  tmdbGalleryUrls: string[]
 }
 
 export type PosterPalette = [string, string, string]

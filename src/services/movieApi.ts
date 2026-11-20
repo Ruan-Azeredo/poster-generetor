@@ -50,6 +50,15 @@ interface TmdbTvDetails {
   backdrop_path?: string | null
 }
 
+interface TmdbImageItem {
+  file_path: string
+}
+
+interface TmdbImagesResponse {
+  posters?: TmdbImageItem[]
+  backdrops?: TmdbImageItem[]
+}
+
 function buildImageUrl(path?: string | null, size = 'w780') {
   if (!path) {
     return ''
@@ -67,10 +76,16 @@ function getApiKey() {
   return key
 }
 
-async function tmdbFetch<T>(path: string) {
+async function tmdbFetch<T>(path: string, extraParams?: Record<string, string>) {
   const url = new URL(`${TMDB_API_BASE}${path}`)
   url.searchParams.set('api_key', getApiKey())
   url.searchParams.set('language', DEFAULT_LANG)
+
+  if (extraParams) {
+    for (const [key, value] of Object.entries(extraParams)) {
+      url.searchParams.set(key, value)
+    }
+  }
 
   const response = await fetch(url)
 
@@ -79,6 +94,47 @@ async function tmdbFetch<T>(path: string) {
   }
 
   return (await response.json()) as T
+}
+
+async function fetchTmdbGallery(
+  mediaType: 'movie' | 'tv',
+  id: number,
+  fallbackPaths: Array<string | null | undefined>,
+) {
+  const uniquePaths = new Set<string>()
+
+  for (const path of fallbackPaths) {
+    if (path) {
+      uniquePaths.add(path)
+    }
+  }
+
+  try {
+    const images = await tmdbFetch<TmdbImagesResponse>(`/${mediaType}/${id}/images`, {
+      include_image_language: 'en,null',
+    })
+
+    for (const item of images.backdrops ?? []) {
+      if (uniquePaths.size >= 3) break
+      if (item.file_path) {
+        uniquePaths.add(item.file_path)
+      }
+    }
+
+    for (const item of images.posters ?? []) {
+      if (uniquePaths.size >= 3) break
+      if (item.file_path) {
+        uniquePaths.add(item.file_path)
+      }
+    }
+  } catch {
+    // Fallback to backdrop_path / poster_path already added above
+  }
+
+  return [...uniquePaths]
+    .slice(0, 3)
+    .map((path) => buildImageUrl(path, 'w780'))
+    .filter(Boolean)
 }
 
 function getYear(date?: string) {
@@ -159,6 +215,11 @@ async function fetchMovieData(id: number): Promise<PosterMovieData> {
     tmdbFetch<TmdbCreditsResponse>(`/movie/${id}/credits`),
   ])
 
+  const tmdbGalleryUrls = await fetchTmdbGallery('movie', id, [
+    details.backdrop_path,
+    details.poster_path,
+  ])
+
   return {
     title: details.title,
     originalTitle: details.original_title,
@@ -170,6 +231,7 @@ async function fetchMovieData(id: number): Promise<PosterMovieData> {
     tmdbImageUrl: buildImageUrl(details.poster_path, 'w780') || buildImageUrl(details.backdrop_path, 'w780'),
     tmdbPosterUrl: buildImageUrl(details.poster_path, 'w780'),
     tmdbBackdropUrl: buildImageUrl(details.backdrop_path, 'w780'),
+    tmdbGalleryUrls,
   }
 }
 
@@ -177,6 +239,11 @@ async function fetchTvData(id: number): Promise<PosterMovieData> {
   const [details, credits] = await Promise.all([
     tmdbFetch<TmdbTvDetails>(`/tv/${id}`),
     tmdbFetch<TmdbCreditsResponse>(`/tv/${id}/aggregate_credits`),
+  ])
+
+  const tmdbGalleryUrls = await fetchTmdbGallery('tv', id, [
+    details.backdrop_path,
+    details.poster_path,
   ])
 
   return {
@@ -190,6 +257,7 @@ async function fetchTvData(id: number): Promise<PosterMovieData> {
     tmdbImageUrl: buildImageUrl(details.poster_path, 'w780') || buildImageUrl(details.backdrop_path, 'w780'),
     tmdbPosterUrl: buildImageUrl(details.poster_path, 'w780'),
     tmdbBackdropUrl: buildImageUrl(details.backdrop_path, 'w780'),
+    tmdbGalleryUrls,
   }
 }
 
